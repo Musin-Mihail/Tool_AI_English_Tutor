@@ -57,6 +57,34 @@ MASTER_PROMPT_TEXT = """
 {
     "next_task": "Текст предложения на русском..."
 }
+
+РЕЖИМ 3: ГЕНЕРАЦИЯ КАРТОЧЕК (Action: GENERATE_FLASHCARDS)
+Создай РОВНО 20 новых карточек для перевода (обычный быт: дом, еда, магазин, транспорт, здоровье, работа/учёба, общение в быту).
+Карточка может быть отдельным словом, словосочетанием или целым предложением (смешивай типы).
+Сначала внимательно изучи список EXISTING CARDS (включая их nuances) и сам определи, каких тем/лексики не хватает.
+Не дублируй уже существующие карточки и не создавай близкие по смыслу, из‑за которых в голове будет путаница.
+Если тема соседняя с уже существующей карточкой — в nuances явно отдели новый смысл от старого (укажи, с какой карточкой не путать).
+Каждая карточка ОБЯЗАНА содержать nuances: подробные пояснения, каждое с НОВОЙ строки.
+В nuances распиши:
+- что значит основной английский вариант и когда его выбирать;
+- чем отличаются другие en_variants (US/UK, регистр, идиома);
+- с чем НЕ путать (ложные друзья / близкие слова) — и какой правильный английский у «путаницы»;
+- при необходимости отсылку к уже существующей карточке из списка.
+Язык поля nuances — русский. Не сжимай текст: лучше понятно и полно, чем коротко.
+Английские варианты клади в массив en_variants (1–4 строки). Если есть US/UK или равноценные формулировки одного смысла — отдельные элементы массива.
+ЗАПРЕЩЕНО класть в en_variants слова с другим смыслом; такие слова только в nuances как «не путать».
+Верни JSON:
+{
+    "cards": [
+        {
+            "ru_text": "текст на русском",
+            "en_variants": ["English variant 1", "English variant 2"],
+            "nuances": "Строка нюанса 1.\\nСтрока нюанса 2.\\nСтрока нюанса 3.",
+            "card_type": "word"
+        }
+    ]
+}
+card_type — одно из: word, phrase, sentence.
 """
 
 
@@ -78,6 +106,38 @@ def ensure_grader_schema(data: Dict[str, Any]) -> Dict[str, Any]:
         "sentences_feedback": data.get("sentences_feedback", []),
         "recommendation": data.get("recommendation", ""),
     }
+
+
+def ensure_flashcards_schema(data: Dict[str, Any]) -> list:
+    from app.data.database import normalize_en_variants
+
+    raw_cards = data.get("cards", [])
+    if not isinstance(raw_cards, list):
+        return []
+    allowed_types = {"word", "phrase", "sentence"}
+    result = []
+    for item in raw_cards:
+        if not isinstance(item, dict):
+            continue
+        ru = str(item.get("ru_text", "")).strip()
+        variants = normalize_en_variants(
+            item.get("en_variants"), str(item.get("en_text", "")).strip()
+        )
+        if not ru or not variants:
+            continue
+        card_type = str(item.get("card_type", "phrase")).strip().lower()
+        if card_type not in allowed_types:
+            card_type = "phrase"
+        result.append(
+            {
+                "ru_text": ru,
+                "en_variants": variants,
+                "en_text": " / ".join(variants),
+                "nuances": str(item.get("nuances", "")).strip(),
+                "card_type": card_type,
+            }
+        )
+    return result[:20]
 
 
 def parse_json_response(raw_text: str) -> Dict[str, Any]:

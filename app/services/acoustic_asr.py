@@ -48,8 +48,23 @@ def _load_model(device: str) -> Tuple[object, object, str]:
     model_id = settings.ACOUSTIC_ASR_MODEL
     cache_dir = str(WAV2VEC2_DIR)
     print(f"--- Loading acoustic ASR '{model_id}' on {device} ---")
-    processor = Wav2Vec2Processor.from_pretrained(model_id, cache_dir=cache_dir)
-    model = Wav2Vec2ForCTC.from_pretrained(model_id, cache_dir=cache_dir)
+
+    def _from_pretrained(local_only: bool):
+        processor = Wav2Vec2Processor.from_pretrained(
+            model_id, cache_dir=cache_dir, local_files_only=local_only
+        )
+        model = Wav2Vec2ForCTC.from_pretrained(
+            model_id, cache_dir=cache_dir, local_files_only=local_only
+        )
+        return processor, model
+
+    try:
+        processor, model = _from_pretrained(local_only=True)
+        print("--- Acoustic ASR loaded from local cache (no download) ---")
+    except (OSError, ValueError) as e:
+        print(f"--- Acoustic ASR cache incomplete ({e}); downloading ---")
+        processor, model = _from_pretrained(local_only=False)
+
     model.to(device)
     model.eval()
     return processor, model, device

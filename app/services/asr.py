@@ -153,7 +153,7 @@ def _ensure_model_files(model_name: str, retries: int = 5) -> str:
 
     raise RuntimeError(
         f"Failed to download Whisper model '{repo_id}' after {retries} attempts. "
-        "Check internet access to huggingface.co (or set a working proxy), "
+        "Check internet access to huggingface.co, "
         "then restart the server."
     ) from last_error
 

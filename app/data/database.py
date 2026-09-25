@@ -1,10 +1,11 @@
 import json
 import os
+import random
 import shutil
 from datetime import datetime
 
 from app.paths import AUDIO_DIR, DB_PATH
-from typing import List, Dict, Optional
+from typing import Any, Dict, List, Optional
 from sqlalchemy import (
     create_engine,
     Column,
@@ -53,6 +54,47 @@ class Journal(Base):
     task = relationship("Task", back_populates="journals")
 
 
+class Flashcard(Base):
+    __tablename__ = "flashcards"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ru_text = Column(Text, nullable=False)
+    en_text = Column(Text, nullable=False)
+    en_variants = Column(Text, default="[]")
+    nuances = Column(Text, default="")
+    card_type = Column(String, default="phrase")
+    show_count = Column(Integer, default=0)
+    correct_count = Column(Integer, default=0)
+    incorrect_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+def normalize_en_variants(raw: Any, en_text: str = "") -> List[str]:
+    """Normalize en_variants list or legacy en_text with ' / ' separators."""
+    variants: List[str] = []
+    if isinstance(raw, list):
+        variants = [str(v).strip() for v in raw if str(v).strip()]
+    elif isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                variants = [str(v).strip() for v in parsed if str(v).strip()]
+        except json.JSONDecodeError:
+            variants = []
+    if not variants and en_text:
+        variants = [p.strip() for p in en_text.split(" / ") if p.strip()]
+    # de-dupe preserving order
+    seen = set()
+    out: List[str] = []
+    for v in variants:
+        key = v.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(v)
+    return out[:4]
+
+
 class DatabaseManager:
     def __init__(self, db_url: Optional[str] = None):
         DATA_DIR = DB_PATH.parent
@@ -66,7 +108,40 @@ class DatabaseManager:
         self.SessionLocal = sessionmaker(
             autocommit=False, autoflush=False, bind=self.engine
         )
+        self._ensure_flashcard_en_variants_column()
         self._init_default_topics()
+        from app.data.flashcard_seed import FLASHCARD_SEED
+
+        self.seed_flashcards_if_empty(FLASHCARD_SEED)
+        self.sync_flashcards_from_seed(FLASHCARD_SEED)
+        self._migrate_flashcard_en_variants()
+
+    def _ensure_flashcard_en_variants_column(self) -> None:
+        with self.engine.connect() as conn:
+            rows = conn.exec_driver_sql("PRAGMA table_info(flashcards)").fetchall()
+            colnames = {row[1] for row in rows}
+            if "en_variants" not in colnames:
+                conn.exec_driver_sql(
+                    "ALTER TABLE flashcards ADD COLUMN en_variants TEXT DEFAULT '[]'"
+                )
+                conn.commit()
+
+    def _migrate_flashcard_en_variants(self) -> None:
+        with self.SessionLocal() as session:
+            cards = session.query(Flashcard).all()
+            changed = False
+            for card in cards:
+                current = normalize_en_variants(card.en_variants, card.en_text or "")
+                if not current:
+                    continue
+                encoded = json.dumps(current, ensure_ascii=False)
+                joined = " / ".join(current)
+                if (card.en_variants or "").strip() in ("", "[]") or card.en_text != joined:
+                    card.en_variants = encoded
+                    card.en_text = joined
+                    changed = True
+            if changed:
+                session.commit()
 
     def _init_default_topics(self):
         default_topics = [
@@ -89,6 +164,177 @@ class DatabaseManager:
                 if not exists:
                     new_topic = UserPerformance(topic_name=topic)
                     session.add(new_topic)
+            session.commit()
+
+    def _flashcard_to_dict(self, card: Flashcard) -> Dict[str, Any]:
+        variants = normalize_en_variants(card.en_variants, card.en_text or "")
+        return {
+            "id": card.id,
+            "ru_text": card.ru_text,
+            "en_text": " / ".join(variants) if variants else (card.en_text or ""),
+            "en_variants": variants,
+            "nuances": card.nuances or "",
+            "card_type": card.card_type or "phrase",
+            "show_count": card.show_count or 0,
+            "correct_count": card.correct_count or 0,
+            "incorrect_count": card.incorrect_count or 0,
+        }
+
+    def seed_flashcards_if_empty(self, cards: List[Dict[str, Any]]) -> int:
+        with self.SessionLocal() as session:
+            if session.query(Flashcard).count() > 0:
+                return 0
+            return self._insert_flashcards(session, cards)
+
+    def sync_flashcards_from_seed(self, cards: List[Dict[str, Any]]) -> Dict[str, int]:
+        """Update seed cards by ru_text; keep show/correct/incorrect counts.
+
+        Cards present in DB but not in seed (e.g. generated) are left untouched.
+        Seed cards missing from DB are inserted.
+        """
+        updated = 0
+        inserted = 0
+        with self.SessionLocal() as session:
+            existing = session.query(Flashcard).all()
+            by_ru: Dict[str, Flashcard] = {}
+            for card in existing:
+                key = (card.ru_text or "").strip()
+                if key and key not in by_ru:
+                    by_ru[key] = card
+
+            to_insert: List[Dict[str, Any]] = []
+            for raw in cards:
+                ru = (raw.get("ru_text") or "").strip()
+                variants = normalize_en_variants(
+                    raw.get("en_variants"), raw.get("en_text") or ""
+                )
+                if not ru or not variants:
+                    continue
+                nuances = (raw.get("nuances") or "").strip()
+                card_type = (raw.get("card_type") or "phrase").strip() or "phrase"
+                encoded = json.dumps(variants, ensure_ascii=False)
+                joined = " / ".join(variants)
+                matched = by_ru.get(ru)
+                if matched is None:
+                    to_insert.append(
+                        {
+                            "ru_text": ru,
+                            "en_variants": variants,
+                            "en_text": joined,
+                            "nuances": nuances,
+                            "card_type": card_type,
+                        }
+                    )
+                    continue
+                if (
+                    matched.nuances != nuances
+                    or (matched.en_variants or "") != encoded
+                    or (matched.en_text or "") != joined
+                    or (matched.card_type or "") != card_type
+                ):
+                    matched.nuances = nuances
+                    matched.en_variants = encoded
+                    matched.en_text = joined
+                    matched.card_type = card_type
+                    updated += 1
+
+            if to_insert:
+                inserted = self._insert_flashcards(session, to_insert)
+            elif updated:
+                session.commit()
+        return {"updated": updated, "inserted": inserted}
+
+    def add_flashcards(self, cards: List[Dict[str, Any]]) -> int:
+        with self.SessionLocal() as session:
+            return self._insert_flashcards(session, cards)
+
+    def _insert_flashcards(self, session, cards: List[Dict[str, Any]]) -> int:
+        added = 0
+        for raw in cards:
+            ru = (raw.get("ru_text") or "").strip()
+            variants = normalize_en_variants(
+                raw.get("en_variants"), raw.get("en_text") or ""
+            )
+            if not ru or not variants:
+                continue
+            card = Flashcard(
+                ru_text=ru,
+                en_text=" / ".join(variants),
+                en_variants=json.dumps(variants, ensure_ascii=False),
+                nuances=(raw.get("nuances") or "").strip(),
+                card_type=(raw.get("card_type") or "phrase").strip() or "phrase",
+            )
+            session.add(card)
+            added += 1
+        session.commit()
+        return added
+
+    def _flashcard_priority(self, card: Flashcard) -> int:
+        """Lower priority = show sooner.
+        priority = show_count + 3 * correct_count - incorrect_count
+        """
+        return (
+            (card.show_count or 0)
+            + 3 * (card.correct_count or 0)
+            - (card.incorrect_count or 0)
+        )
+
+    def get_least_shown_flashcard(
+        self, exclude_id: Optional[int] = None
+    ) -> Optional[Dict[str, Any]]:
+        with self.SessionLocal() as session:
+            query = session.query(Flashcard)
+            if exclude_id is not None:
+                query = query.filter(Flashcard.id != exclude_id)
+            cards = query.all()
+            if not cards:
+                if exclude_id is not None:
+                    card = session.query(Flashcard).filter_by(id=exclude_id).first()
+                    return self._flashcard_to_dict(card) if card else None
+                return None
+            min_priority = min(self._flashcard_priority(c) for c in cards)
+            candidates = [
+                c for c in cards if self._flashcard_priority(c) == min_priority
+            ]
+            return self._flashcard_to_dict(random.choice(candidates))
+
+    def get_flashcard_by_id(self, card_id: int) -> Optional[Dict[str, Any]]:
+        with self.SessionLocal() as session:
+            card = session.query(Flashcard).filter_by(id=card_id).first()
+            return self._flashcard_to_dict(card) if card else None
+
+    def get_all_flashcards_for_context(self) -> str:
+        with self.SessionLocal() as session:
+            cards = session.query(Flashcard).order_by(Flashcard.id.asc()).all()
+            if not cards:
+                return "Existing flashcards: (empty)"
+            lines = ["Existing flashcards:"]
+            for c in cards:
+                lines.append(
+                    f"- [{c.card_type}] RU: {c.ru_text} | EN: {c.en_text}"
+                )
+                nuances = (c.nuances or "").strip()
+                if nuances:
+                    for nuance_line in nuances.splitlines():
+                        nuance_line = nuance_line.strip()
+                        if nuance_line:
+                            lines.append(f"  nuance: {nuance_line}")
+            return "\n".join(lines)
+
+    def count_flashcards(self) -> int:
+        with self.SessionLocal() as session:
+            return session.query(Flashcard).count()
+
+    def record_flashcard_result(self, card_id: int, is_correct: bool) -> None:
+        with self.SessionLocal() as session:
+            card = session.query(Flashcard).filter_by(id=card_id).first()
+            if not card:
+                return
+            card.show_count = (card.show_count or 0) + 1
+            if is_correct:
+                card.correct_count = (card.correct_count or 0) + 1
+            else:
+                card.incorrect_count = (card.incorrect_count or 0) + 1
             session.commit()
 
     def get_context(self):

@@ -1,5 +1,6 @@
 import hashlib
 import os
+import shutil
 import time
 import urllib.request
 from functools import lru_cache
@@ -26,6 +27,19 @@ def pad_audio_slots(paths: List[Optional[str]], size: int = 5) -> List[Optional[
     while len(out) < size:
         out.append(None)
     return out
+
+
+def parse_en_variants(en_text_or_list: Any = None, en_text: str = "") -> List[str]:
+    """Split English variants from a list or legacy 'a / b' string."""
+    from app.data.database import normalize_en_variants
+
+    return normalize_en_variants(en_text_or_list, en_text)
+
+
+def english_tts_text(en_text: str) -> str:
+    """Legacy: first English variant only."""
+    variants = parse_en_variants(None, en_text)
+    return variants[0] if variants else ""
 
 
 def _download_file(url: str, dest: Path, retries: int = 5) -> None:
@@ -136,6 +150,50 @@ def synthesize_text(text: str, voice: Optional[str] = None) -> Optional[str]:
             except OSError:
                 pass
         return None
+
+
+def synthesize_en_variants(
+    variants: List[str], voice: Optional[str] = None
+) -> List[Optional[str]]:
+    """Synthesize each English variant as a separate WAV (max 4)."""
+    paths: List[Optional[str]] = []
+    for text in (variants or [])[:4]:
+        paths.append(synthesize_text(text, voice=voice))
+    return pad_audio_slots(paths, size=4)
+
+
+_play_generation = 0
+
+
+def remount_audio_paths(paths: List[Optional[str]], size: int = 4) -> List[Optional[str]]:
+    """Copy WAVs to unique names so Gradio Audio remounts at position 0."""
+    global _play_generation
+    _play_generation += 1
+    gen = _play_generation
+    TTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+    for old in TTS_CACHE_DIR.glob("ui_play_*.wav"):
+        try:
+            parts = old.stem.split("_")
+            # ui_play_{gen}_{slot}
+            if len(parts) >= 4 and int(parts[2]) < gen - 1:
+                old.unlink(missing_ok=True)
+        except (ValueError, OSError):
+            pass
+
+    out: List[Optional[str]] = []
+    for i, src in enumerate(pad_audio_slots(list(paths or []), size=size)):
+        if not src or not os.path.exists(src):
+            out.append(None)
+            continue
+        dest = TTS_CACHE_DIR / f"ui_play_{gen}_{i}.wav"
+        try:
+            shutil.copy2(src, dest)
+            out.append(str(dest))
+        except OSError as e:
+            print(f"!!! TTS remount copy failed: {e}")
+            out.append(src)
+    return out
 
 
 def synthesize_correct_variants(result: Dict[str, Any]) -> List[Optional[str]]:

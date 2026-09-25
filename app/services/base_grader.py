@@ -16,3 +16,8 @@ class BaseGraderAgent(Protocol):
         context_table: Optional[str] = "",
         context_journal: Optional[str] = "",
     ) -> Dict[str, Any]: ...
+
+    async def generate_flashcards(
+        self,
+        existing_cards_context: Optional[str] = "",
+    ) -> Dict[str, Any]: ...

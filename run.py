@@ -13,48 +13,19 @@ load_dotenv(PROJECT_ROOT / ".env")
 # Hugging Face: длинный таймаут для больших моделей (large-v3 ~3 ГБ)
 os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "300")
 
-PROXY_URL = os.getenv("PROXY_URL")
-AI_PROVIDER = (os.getenv("AI_PROVIDER") or "cursor").lower()
-
-if PROXY_URL:
-    print(f"--- Applying Proxy Settings: {PROXY_URL} ---")
-    os.environ["http_proxy"] = PROXY_URL
-    os.environ["https_proxy"] = PROXY_URL
-    os.environ["GRPC_PROXY_EXP"] = PROXY_URL
-
-    # Локальные адреса + Hugging Face (скачивание Whisper не должно ломаться прокси)
-    no_proxy_hosts = [
-        "localhost",
-        "127.0.0.1",
-        "::1",
-        "huggingface.co",
-        "hf.co",
-        "cdn-lfs.huggingface.co",
-        "github.com",
-        "objects.githubusercontent.com",
-        "release-assets.githubusercontent.com",
-    ]
-    existing = os.environ.get("no_proxy") or os.environ.get("NO_PROXY") or ""
-    merged = ",".join(
-        h
-        for h in (
-            [*existing.split(","), *no_proxy_hosts] if existing else no_proxy_hosts
-        )
-        if h.strip()
-    )
-    os.environ["no_proxy"] = merged
-    os.environ["NO_PROXY"] = merged
-else:
-    print("--- No Proxy Settings found, running directly ---")
-
 if __name__ == "__main__":
     from app.core.config import settings
     from app.services.asr import configure_cuda_runtime_path
 
+    if settings.HF_TOKEN:
+        os.environ["HF_TOKEN"] = settings.HF_TOKEN
+        os.environ["HUGGING_FACE_HUB_TOKEN"] = settings.HF_TOKEN
+        print("--- Hugging Face token configured ---")
+
     # PATH к cublas64_12.dll нужно выставить до первого CUDA-инференса
     configure_cuda_runtime_path()
 
-    if settings.AI_PROVIDER == "cursor" and settings.ASR_PRELOAD:
+    if settings.ASR_PRELOAD:
         from app.services.asr import preload_whisper_model
 
         try:
@@ -85,7 +56,8 @@ if __name__ == "__main__":
             print(f"!!! TTS preload failed: {e}")
             print("Сервер запущен, но озвучка правильного варианта недоступна.")
 
-    from app.ui import build_ui
+    from app.ui import FLASHCARD_CSS, build_ui
 
     demo = build_ui()
-    demo.launch(server_name="0.0.0.0", server_port=8000)
+    print("--- Open http://127.0.0.1:8000 in your browser ---")
+    demo.launch(server_name="127.0.0.1", server_port=8000, css=FLASHCARD_CSS)

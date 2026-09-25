@@ -14,6 +14,7 @@ from app.core.config import settings
 from app.paths import PROJECT_ROOT
 from app.services.prompts import (
     MASTER_PROMPT_TEXT,
+    ensure_flashcards_schema,
     ensure_grader_schema,
     error_grader_result,
     parse_json_response,
@@ -199,5 +200,40 @@ class CursorGraderAgent:
             print(f"!!! [NEXT/Cursor] ERROR: {e}")
             return {
                 "result": "Вчера я играл в футбол.",
+                "tokens": {"input": 0, "output": 0},
+            }
+
+    async def generate_flashcards(
+        self,
+        existing_cards_context: Optional[str] = "",
+    ) -> Dict[str, Any]:
+        user_message = f"""
+        {MASTER_PROMPT_TEXT}
+
+        --- РЕЖИМ: ГЕНЕРАЦИЯ КАРТОЧЕК ---
+        ACTION: GENERATE_FLASHCARDS
+
+        Создай ровно 20 новых карточек на тему обычного быта.
+        Учитывай EXISTING CARDS и их nuances: заполни пробелы, не дублируй смысл, не создавай путаницу с уже изученным.
+        В каждой карточке nuances — подробно, каждый нюанс с новой строки.
+        В en_variants только равноценные переводы одного смысла; иное — только в nuances как «не путать».
+
+        EXISTING CARDS:
+        {existing_cards_context}
+        """
+        try:
+            print(f"\n[FLASHCARDS/Cursor] Sending request ({self.model_name})...")
+            raw_text, tokens = await self._prompt(user_message)
+            print(f"[FLASHCARDS/Cursor] Raw response: {raw_text}")
+            data = parse_json_response(raw_text)
+            cards = ensure_flashcards_schema(data)
+            return {
+                "result": cards,
+                "tokens": tokens,
+            }
+        except Exception as e:
+            print(f"!!! [FLASHCARDS/Cursor] ERROR: {e}")
+            return {
+                "result": [],
                 "tokens": {"input": 0, "output": 0},
             }

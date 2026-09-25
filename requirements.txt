@@ -27,6 +27,3 @@ numpy>=1.26.0
 kokoro-onnx>=0.4.4,<0.4.8
 onnxruntime>=1.20.1
 soundfile>=0.13.0
-
-# Optional: legacy Gemini provider (AI_PROVIDER=gemini)
-google-genai==1.61.0
